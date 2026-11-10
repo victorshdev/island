@@ -1081,11 +1081,24 @@ function buildRifleVM(vr) {
 }
 
 // VR arm: upper arm (bone 0) and forearm with glove (bone 1), each built pointing down -Y from its joint
-function buildArm() {
+function buildArm(hand, side) {
   const b = new MB();
   b.aux = 0; b.mat([0.2, 0.2, 0.2], -1, 0.92); b.sphAt(0, 0, 0, 0.066, 0.066, 0.066, 12, 7); b.tube([0, 0, 0], [0, -0.31, 0], 0.06, 0.048, 14);
   b.aux = 1; b.sphAt(0, 0, 0, 0.05, 0.05, 0.05, 12, 7); b.tube([0, 0, 0], [0, -0.25, 0], 0.048, 0.037, 14);
-  b.mat([0.03, 0.03, 0.032], 0, 0.82); b.tube([0, -0.235, 0], [0, -0.275, 0], 0.04, 0.038, 12); b.boxAt(0, -0.31, 0, 0.075, 0.085, 0.04, 0, 0.016);
+  b.mat([0.03, 0.03, 0.032], 0, 0.82); b.tube([0, -0.235, 0], [0, -0.275, 0], 0.04, 0.038, 12);
+  if (hand) {
+    // open gloved hand: palm, four fingers in three curled joints, thumb on the inner side
+    b.boxAt(0, -0.315, 0, 0.078, 0.09, 0.034, 0, 0.014);
+    b.mat([0.05, 0.05, 0.055], 0.3, 0.5); b.boxAt(0, -0.31, -0.02, 0.06, 0.05, 0.008, 0, 0.003);
+    b.mat([0.03, 0.03, 0.032], 0, 0.82);
+    for (let i = 0; i < 4; i++) {
+      const x = (i - 1.5) * 0.019, len = [0.9, 1, 0.95, 0.78][i];
+      b.at(x, -0.36, 0, 0.18); b.rbox(0.017, 0.034 * len, 0.018, 0.007);
+      m4translate(b.m, 0, -0.034 * len, 0); m4rotX(b.m, 0.42); m4translate(b.m, 0, 0, 0); b.at(0, -0.006, 0); b.rbox(0.016, 0.028 * len, 0.017, 0.007); b.pop();
+      m4translate(b.m, 0, -0.028 * len, 0); m4rotX(b.m, 0.5); b.at(0, -0.008, 0); b.rbox(0.015, 0.024 * len, 0.016, 0.007); b.pop(); b.pop();
+    }
+    b.at(side * 0.044, -0.3, 0.004, 0.25, 0, side * 0.75); b.rbox(0.02, 0.05, 0.02, 0.008); m4translate(b.m, 0, -0.04, 0); m4rotX(b.m, 0.35); b.rbox(0.018, 0.035, 0.018, 0.008); b.pop();
+  }
   return b.build();
 }
 
@@ -1102,7 +1115,7 @@ function genAssets() {
   Mesh.fern = addInstances(buildFern(5), 2700, 8);
   Mesh.grass = addInstances(buildGrassTuft(), 26000, 8);
   Mesh.soldier = buildSoldier();
-  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(1); Mesh.rifleVR2 = buildRifleVM(2); Mesh.arm = buildArm();
+  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(1); Mesh.rifleVR2 = buildRifleVM(2); Mesh.armR = buildArm(false, 1); Mesh.armL = buildArm(true, 1); Mesh.armL2 = buildArm(false, -1);
 }
 
 // ---------- renderer: cascaded shadows, PBR forward pass, bloom, tone map, FXAA ----------
@@ -1826,8 +1839,8 @@ function drawScene(fp) {
     gl.drawElements(gl.TRIANGLES, rv.count, rv.type, 0);
   }
   if (!fp && R.vrArms) {
-    gl.bindVertexArray(Mesh.arm.vao); gl.uniform3f(P.obj.u.uTint, 1, 1, 1);
-    for (const a of R.vrArms) { R.bones.set(a, 0); gl.uniformMatrix4fv(P.obj.u.uBones, false, R.bones); gl.drawElements(gl.TRIANGLES, Mesh.arm.count, Mesh.arm.type, 0); }
+    gl.uniform3f(P.obj.u.uTint, 1, 1, 1);
+    for (const a of R.vrArms) { const am = a.mesh; gl.bindVertexArray(am.vao); R.bones.set(a, 0); gl.uniformMatrix4fv(P.obj.u.uBones, false, R.bones); gl.drawElements(gl.TRIANGLES, am.count, am.type, 0); }
   }
   gl.disable(gl.CULL_FACE); gl.depthMask(false);
   gl.useProgram(P.sky.p); gl.uniformMatrix4fv(P.sky.u.uInvVP, false, R.ivp); gl.bindVertexArray(R.tri); gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -2284,10 +2297,10 @@ function xrCompose(pose) {
   const arms = R.vrArms || (R.vrArms = []); arms.length = 0;
   if (Game.player && !Game.player.dead) {
     const H = XR.headW, yaw = Game.player.yaw, rx = Math.cos(yaw), rz = -Math.sin(yaw), bx = Math.sin(yaw) * 0.06, bz = Math.cos(yaw) * 0.06, sy = H[13] - 0.23;
-    if (XR.hasR) { const g = m4tp(R.wmodel, 0.004, -0.1, 0.12), a = XR.armR || (XR.armR = new Float32Array(32)); xrArm(a, H[12] + rx * 0.19 + bx, sy, H[14] + rz * 0.19 + bz, g[0], g[1], g[2], rx, rz); arms.push(a); }
+    if (XR.hasR) { const g = m4tp(R.wmodel, 0.004, -0.1, 0.12), a = XR.armR || (XR.armR = new Float32Array(32)); xrArm(a, H[12] + rx * 0.19 + bx, sy, H[14] + rz * 0.19 + bz, g[0], g[1], g[2], rx, rz); a.mesh = Mesh.armR; arms.push(a); }
     if (XR.hasL) {
       const g = R.vrTwo ? m4tp(R.wmodel, -0.045, -0.05, -0.2) : m4tp(W, XR.lm[12] + XR.lm[8] * 0.07, XR.lm[13] + XR.lm[9] * 0.07, XR.lm[14] + XR.lm[10] * 0.07), a = XR.armL || (XR.armL = new Float32Array(32));
-      xrArm(a, H[12] - rx * 0.19 + bx, sy, H[14] - rz * 0.19 + bz, g[0], g[1], g[2], -rx, -rz); arms.push(a);
+      xrArm(a, H[12] - rx * 0.19 + bx, sy, H[14] - rz * 0.19 + bz, g[0], g[1], g[2], -rx, -rz); a.mesh = R.vrTwo ? Mesh.armL2 : Mesh.armL; arms.push(a);
     }
   }
   XR.views.length = 0;
