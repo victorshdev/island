@@ -1062,9 +1062,9 @@ function buildRifleVM(vr) {
   poly(); b.boxAt(-0.0195, 0.069, -0.086, 0.005, 0.04, 0.03, 0, 0.002); b.boxAt(0.0195, 0.069, -0.086, 0.005, 0.04, 0.03, 0, 0.002);
   b.boxAt(0, 0.0895, -0.086, 0.044, 0.005, 0.03, 0, 0.002); b.boxAt(0, 0.0495, -0.086, 0.044, 0.005, 0.03, 0, 0.002);
   b.mat([1.0, 0.13, 0.05], 2, 0.5); b.boxAt(0, VM_SIGHT_Y, -0.086, 0.0024, 0.0024, 0.0004, 0, 0);
-  if (!vr) {
+  if (vr !== 1) {
   // left arm: sleeve from the lower left, glove clamped on the side of the handguard, thumb over the top
-    b.mat([0.2, 0.2, 0.2], -1, 0.92); b.tube([-0.2, -0.31, 0.03], [-0.056, -0.07, -0.185], 0.046, 0.036, 16);
+    if (!vr) { b.mat([0.2, 0.2, 0.2], -1, 0.92); b.tube([-0.2, -0.31, 0.03], [-0.056, -0.07, -0.185], 0.046, 0.036, 16); }
     b.mat(glove, 0, 0.82); b.tube([-0.06, -0.076, -0.18], [-0.036, -0.03, -0.225], 0.037, 0.035, 14);
     b.boxAt(-0.031, -0.008, -0.262, 0.026, 0.066, 0.1, 0, 0.012);
     b.boxAt(-0.004, -0.04, -0.262, 0.066, 0.024, 0.098, 0, 0.011);
@@ -1093,7 +1093,7 @@ function genAssets() {
   Mesh.fern = addInstances(buildFern(5), 2700, 8);
   Mesh.grass = addInstances(buildGrassTuft(), 26000, 8);
   Mesh.soldier = buildSoldier();
-  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(true);
+  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(1); Mesh.rifleVR2 = buildRifleVM(2);
 }
 
 // ---------- renderer: cascaded shadows, PBR forward pass, bloom, tone map, FXAA ----------
@@ -1812,9 +1812,9 @@ function drawScene(fp) {
     gl.drawElements(gl.TRIANGLES, Mesh.soldier.count, Mesh.soldier.type, 0);
   }
   if (!fp && R.showWeapon) {       // VR: the carbine is a normal world object in the hand
-    gl.bindVertexArray(Mesh.rifleVR.vao); R.bones.set(R.wmodel, 0);
+    const rv = R.vrTwo ? Mesh.rifleVR2 : Mesh.rifleVR; gl.bindVertexArray(rv.vao); R.bones.set(R.wmodel, 0);
     gl.uniformMatrix4fv(P.obj.u.uBones, false, R.bones); gl.uniform3f(P.obj.u.uTint, 1, 1, 1);
-    gl.drawElements(gl.TRIANGLES, Mesh.rifleVR.count, Mesh.rifleVR.type, 0);
+    gl.drawElements(gl.TRIANGLES, rv.count, rv.type, 0);
   }
   gl.disable(gl.CULL_FACE); gl.depthMask(false);
   gl.useProgram(P.sky.p); gl.uniformMatrix4fv(P.sky.u.uInvVP, false, R.ivp); gl.bindVertexArray(R.tri); gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -2156,7 +2156,7 @@ function inputReset() { In.fire = false; In.ads = false; In.adsToggle = false; I
 const XR = {
   on: false, session: null, ref: null, layer: null, floor: 0, level: 0, views: [], vpool: [], headW: m4(), W: m4(), hm: m4(), rm: m4(), lm: m4(), panel: m4(), big: m4(),
   hx: 0, hy: 1.6, hz: 0, phx: 0, phz: 0, pdx: 0, pdz: 0, hyaw: 0, hpitch: 0, hasR: false, hasL: false, rsrc: null, turned: false, sprint: false,
-  pFire: false, pA: false, pR: false, pS: false, trigEdge: false, lastT: 0, endT: 0, hudT: 0, hudCv: null, first: true
+  two: false, zoom: false, zoomK: 0, tm: m4(), pFire: false, pA: false, pR: false, pS: false, trigEdge: false, lastT: 0, endT: 0, hudT: 0, hudCv: null, first: true
 };
 
 async function xrSupported() {
@@ -2200,18 +2200,19 @@ function xrRead(frame, pose) {
   XR.hx = m[12]; XR.hy = m[13] + XR.floor; XR.hz = m[14]; XR.hyaw = Math.atan2(m[8], m[10]); XR.hpitch = Math.asin(clamp(-m[9], -1, 1));
   XR.pdx = XR.hx - XR.phx; XR.pdz = XR.hz - XR.phz; XR.phx = XR.hx; XR.phz = XR.hz;
   XR.hasL = XR.hasR = false;
-  let mx = 0, mz = 0, fire = false, a = false, rl = false, st = false, tx = 0;
+  let mx = 0, mz = 0, fire = false, a = false, rl = false, st = false, tx = 0, two = false, zoom = false;
   for (const src of XR.session.inputSources) {
     const gp = src.gamepad, ps = src.targetRaySpace ? frame.getPose(src.targetRaySpace, XR.ref) : null;
     const ax = gp ? (gp.axes.length > 3 ? gp.axes[2] : (gp.axes[0] || 0)) : 0, ay = gp ? (gp.axes.length > 3 ? gp.axes[3] : (gp.axes[1] || 0)) : 0;
     if (src.handedness === 'right') {
       if (ps) { XR.rm.set(ps.transform.matrix); XR.hasR = true; XR.rsrc = src; }
-      if (gp) { fire = !!(gp.buttons[0] && gp.buttons[0].value > 0.55); a = xrBtn(gp, 4); rl = rl || xrBtn(gp, 5) || xrBtn(gp, 1); tx = ax; }
+      if (gp) { fire = !!(gp.buttons[0] && gp.buttons[0].value > 0.55); a = xrBtn(gp, 4); rl = rl || xrBtn(gp, 5); zoom = xrBtn(gp, 1); tx = ax; }
     } else if (src.handedness === 'left') {
       if (ps) { XR.lm.set(ps.transform.matrix); XR.hasL = true; }
-      if (gp) { mx = Math.abs(ax) > 0.15 ? ax : 0; mz = Math.abs(ay) > 0.15 ? -ay : 0; st = xrBtn(gp, 3); rl = rl || xrBtn(gp, 4) || xrBtn(gp, 5); }
+      if (gp) { mx = Math.abs(ax) > 0.15 ? ax : 0; mz = Math.abs(ay) > 0.15 ? -ay : 0; st = xrBtn(gp, 3); rl = rl || xrBtn(gp, 4) || xrBtn(gp, 5); two = xrBtn(gp, 1); }
     }
   }
+  XR.two = two; XR.zoom = zoom;
   XR.trigEdge = fire && !XR.pFire; XR.pFire = fire;
   if (a && !XR.pA) In.jump = true; XR.pA = a;
   if (rl && !XR.pR) In.reload = true; XR.pR = rl;
@@ -2229,7 +2230,19 @@ function xrWorld(p) {
 function xrWeapon(p) {
   R.showWeapon = XR.hasR;
   if (!XR.hasR) { R.laser = null; return; }
-  const m = R.wmodel; m4mul(m, XR.W, XR.rm); m4translate(m, 0, 0.075, -0.03 + p.kick * 0.03); m4rotX(m, p.kick * 0.06);
+  const m = R.wmodel, r = XR.rm, l = XR.lm; R.vrTwo = false;
+  if (XR.two && XR.hasL) {
+    // two-handed hold: the barrel follows the line from the right hand to the left hand
+    let dx = l[12] - r[12], dy = l[13] - r[13], dz = l[14] - r[14]; const d = Math.hypot(dx, dy, dz);
+    if (d > 0.12 && d < 0.85) {
+      const zx = -dx / d, zy = -dy / d, zz = -dz / d; let xx = r[5] * zz - r[6] * zy, xy = r[6] * zx - r[4] * zz, xz = r[4] * zy - r[5] * zx; const xl = Math.hypot(xx, xy, xz) || 1; xx /= xl; xy /= xl; xz /= xl;
+      const T = XR.tm; T[0] = xx; T[1] = xy; T[2] = xz; T[3] = 0; T[4] = zy * xz - zz * xy; T[5] = zz * xx - zx * xz; T[6] = zx * xy - zy * xx; T[7] = 0; T[8] = zx; T[9] = zy; T[10] = zz; T[11] = 0; T[12] = r[12]; T[13] = r[13]; T[14] = r[14]; T[15] = 1;
+      m4mul(m, XR.W, T); R.vrTwo = true;
+    }
+  }
+  const kf = R.vrTwo ? 0.45 : 1;
+  if (!R.vrTwo) m4mul(m, XR.W, r);
+  m4translate(m, 0, 0.075, -0.03 + p.kick * 0.03 * kf); m4rotX(m, p.kick * 0.06 * kf);
   const mp = m4tp(m, VM_MUZZLE[0], VM_MUZZLE[1], VM_MUZZLE[2]), mx = mp[0], my = mp[1], mz = mp[2], dx = -m[8], dy = -m[9], dz = -m[10];
   const h = rayWorld(mx, my, mz, dx, dy, dz, 80), L = h.t >= 0 ? h.t : 80;
   const lz = R.laser || (R.laser = [0, 0, 0, 0, 0, 0]);
@@ -2243,13 +2256,13 @@ function xrCompose(pose) {
   for (const v of pose.views) {
     const vp = XR.layer.getViewport(v); if (!vp || !vp.width) continue;
     const e = XR.vpool[XR.views.length] || (XR.vpool[XR.views.length] = { camW: m4(), proj: m4(), x: 0, y: 0, w: 0, h: 0 });
-    m4mul(e.camW, W, v.transform.matrix); e.proj.set(v.projectionMatrix); e.x = vp.x; e.y = vp.y; e.w = vp.width; e.h = vp.height; XR.views.push(e);
+    m4mul(e.camW, W, v.transform.matrix); e.proj.set(v.projectionMatrix);
+    if (XR.zoomK > 0.01) { const z = 1 + 1.6 * XR.zoomK; e.proj[0] *= z; e.proj[5] *= z; e.proj[8] *= z; e.proj[9] *= z; } e.x = vp.x; e.y = vp.y; e.w = vp.width; e.h = vp.height; XR.views.push(e);
   }
   const pn = R.vrPanels || (R.vrPanels = []); pn.length = 0;
   const scale = (m, sx, sy) => { for (let i = 0; i < 4; i++) { m[i] *= sx; m[4 + i] *= sy; } };
   if (Game.state === 'end') { const m = XR.big; m.set(XR.headW); m4translate(m, 0, -0.08, -1.2); scale(m, 0.44, 0.22); pn.push({ m, a: 0.96 }); }
-  else if (XR.hasL) { const m = XR.panel; m4mul(m, W, XR.lm); m4translate(m, 0, 0.11, 0.03); m4rotX(m, -0.55); scale(m, 0.12, 0.06); pn.push({ m, a: 0.96 }); }
-  else { const m = XR.big; m.set(XR.headW); m4translate(m, 0, -0.42, -1.0); m4rotX(m, -0.5); scale(m, 0.2, 0.1); pn.push({ m, a: 0.85 }); }
+  else if (XR.zoomK < 0.5) { const m = XR.big; m.set(XR.headW); m4translate(m, -0.36, -0.3, -1.0); m4rotY(m, 0.3); m4rotX(m, -0.25); scale(m, 0.19, 0.095); pn.push({ m, a: 0.9 }); }
 }
 // wrist display: minimap plus ammo, health and hostiles, drawn to a canvas and uploaded as a texture
 function xrHud(dt) {
@@ -2284,6 +2297,7 @@ function xrFrame(t, frame) {
   xrRead(frame, pose);
   if (Game.state === 'play') updateGame(dt);
   else { updatePlayer(Math.min(dt, 0.02)); XR.endT += dt; if (Game.state === 'end' && XR.trigEdge && XR.endT > 1.5) startGame(); }
+  XR.zoomK = clamp(XR.zoomK + (XR.zoom && Game.state === 'play' ? dt : -dt) * 6, 0, 1);
   xrCompose(pose); xrHud(dt);
   renderXR(dt, XR.views, XR.headW, XR.layer);
 }
@@ -2297,7 +2311,12 @@ const Game = {
 const $ = id => document.getElementById(id);
 
 function newGame() {
-  const sp = World.spawn;
+  let sp = World.spawn;
+  if (!window.__TEST) for (let t = 0; t < 40; t++) {      // a different landing beach every game, away from the hostile groups
+    const a = Math.random() * TAU, s = findShore(a, 0.9); if (!s[2]) continue;
+    if (World.groups.some(g => Math.hypot(g.x - s[0], g.z - s[1]) < 120)) continue;
+    const q = collideTrunks(s[0], s[1], 0.6); sp = { x: q[0], z: q[1], yaw: Math.atan2(q[0], q[1]) }; break;
+  }
   Game.player = {
     x: sp.x, z: sp.z, y: heightAt(sp.x, sp.z), vx: 0, vy: 0, vz: 0, yaw: sp.yaw, pitch: 0.04, ground: true, crouch: 0, eye: 1.68,
     vyaw: sp.yaw, hp: 100, regenT: 0, mag: WPN.mag, reserve: WPN.reserve, fireT: 0, reloadT: 0, ads: 0, recoilP: 0, recoilY: 0, kick: 0, bloom: 0,
@@ -2483,7 +2502,7 @@ function playerFire() {
   let dx, dy, dz, bx, by, bz, ox = 0, oy = 0, oz = 0, mxw, myw, mzw;
   if (XR.on) {
     // the bullet leaves the muzzle of the tracked carbine
-    const m = R.wmodel, spr = 0.004 + p.bloom * 0.35, mp = m4tp(m, VM_MUZZLE[0], VM_MUZZLE[1], VM_MUZZLE[2]);
+    const m = R.wmodel, spr = (0.004 + p.bloom * 0.35) * (R.vrTwo ? 0.45 : 1), mp = m4tp(m, VM_MUZZLE[0], VM_MUZZLE[1], VM_MUZZLE[2]);
     mxw = bx = mp[0]; myw = by = mp[1]; mzw = bz = mp[2];
     dx = -m[8] + (Math.random() + Math.random() - 1) * spr; dy = -m[9] + (Math.random() + Math.random() - 1) * spr; dz = -m[10] + (Math.random() + Math.random() - 1) * spr;
     const l = Math.hypot(dx, dy, dz); dx /= l; dy /= l; dz /= l;
