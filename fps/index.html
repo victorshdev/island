@@ -1080,6 +1080,15 @@ function buildRifleVM(vr) {
   return b.build();
 }
 
+// VR arm: upper arm (bone 0) and forearm with glove (bone 1), each built pointing down -Y from its joint
+function buildArm() {
+  const b = new MB();
+  b.aux = 0; b.mat([0.2, 0.2, 0.2], -1, 0.92); b.sphAt(0, 0, 0, 0.066, 0.066, 0.066, 12, 7); b.tube([0, 0, 0], [0, -0.31, 0], 0.06, 0.048, 14);
+  b.aux = 1; b.sphAt(0, 0, 0, 0.05, 0.05, 0.05, 12, 7); b.tube([0, 0, 0], [0, -0.25, 0], 0.048, 0.037, 14);
+  b.mat([0.03, 0.03, 0.032], 0, 0.82); b.tube([0, -0.235, 0], [0, -0.275, 0], 0.04, 0.038, 12); b.boxAt(0, -0.31, 0, 0.075, 0.085, 0.04, 0, 0.016);
+  return b.build();
+}
+
 function genAssets() {
   genNoiseTex(); genFrondTex(); genGrassTex();
   Tex.black = mkTex(1, 1, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
@@ -1093,7 +1102,7 @@ function genAssets() {
   Mesh.fern = addInstances(buildFern(5), 2700, 8);
   Mesh.grass = addInstances(buildGrassTuft(), 26000, 8);
   Mesh.soldier = buildSoldier();
-  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(1); Mesh.rifleVR2 = buildRifleVM(2);
+  Mesh.rifle = buildRifleVM(false); Mesh.rifleVR = buildRifleVM(1); Mesh.rifleVR2 = buildRifleVM(2); Mesh.arm = buildArm();
 }
 
 // ---------- renderer: cascaded shadows, PBR forward pass, bloom, tone map, FXAA ----------
@@ -1816,6 +1825,10 @@ function drawScene(fp) {
     gl.uniformMatrix4fv(P.obj.u.uBones, false, R.bones); gl.uniform3f(P.obj.u.uTint, 1, 1, 1);
     gl.drawElements(gl.TRIANGLES, rv.count, rv.type, 0);
   }
+  if (!fp && R.vrArms) {
+    gl.bindVertexArray(Mesh.arm.vao); gl.uniform3f(P.obj.u.uTint, 1, 1, 1);
+    for (const a of R.vrArms) { R.bones.set(a, 0); gl.uniformMatrix4fv(P.obj.u.uBones, false, R.bones); gl.drawElements(gl.TRIANGLES, Mesh.arm.count, Mesh.arm.type, 0); }
+  }
   gl.disable(gl.CULL_FACE); gl.depthMask(false);
   gl.useProgram(P.sky.p); gl.uniformMatrix4fv(P.sky.u.uInvVP, false, R.ivp); gl.bindVertexArray(R.tri); gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -2187,7 +2200,7 @@ async function enterVR() {
 }
 function xrEnded() {
   if (!XR.on) return;
-  XR.on = false; XR.session = null; GLX.vr = false; R.vrPanels = null; R.laser = null;
+  XR.on = false; XR.session = null; GLX.vr = false; R.vrPanels = null; R.laser = null; R.vrArms = null;
   Perf.lvl = -1; applyQuality(Perf.quality); setState('menu');
 }
 const xrBtn = (gp, i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
@@ -2250,8 +2263,33 @@ function xrWeapon(p) {
 }
 function xrPulse(v, ms) { try { const h = XR.rsrc && XR.rsrc.gamepad && XR.rsrc.gamepad.hapticActuators; if (h && h[0]) h[0].pulse(v, ms); } catch (e) { } }
 
+// bone frame at a whose -Y axis points at b
+function xrBone(out, o, ax, ay, az, bx, by, bz) {
+  let yx = ax - bx, yy = ay - by, yz = az - bz; const l = Math.hypot(yx, yy, yz) || 1; yx /= l; yy /= l; yz /= l;
+  let xx = yz, xy = 0, xz = -yx; if (Math.abs(yy) > 0.98) { xx = 1; xz = 0; } const xl = Math.hypot(xx, xy, xz) || 1; xx /= xl; xz /= xl;
+  out[o] = xx; out[o + 1] = xy; out[o + 2] = xz; out[o + 3] = 0; out[o + 4] = yx; out[o + 5] = yy; out[o + 6] = yz; out[o + 7] = 0;
+  out[o + 8] = xy * yz - xz * yy; out[o + 9] = xz * yx - xx * yz; out[o + 10] = xx * yy - xy * yx; out[o + 11] = 0; out[o + 12] = ax; out[o + 13] = ay; out[o + 14] = az; out[o + 15] = 1;
+}
+// two-bone IK from a shoulder under the head to the hand; the elbow hangs down and outward
+function xrArm(out, sx, sy, sz, hx, hy, hz, ox, oz) {
+  const L1 = 0.31, L2 = 0.31; let dx = hx - sx, dy = hy - sy, dz = hz - sz, d = Math.hypot(dx, dy, dz) || 1e-3; dx /= d; dy /= d; dz /= d;
+  d = clamp(d, 0.08, L1 + L2 - 0.004);
+  const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d), h = Math.sqrt(Math.max(L1 * L1 - a * a, 0));
+  let px = ox * 0.55, py = -1, pz = oz * 0.55; const k = px * dx + py * dy + pz * dz; px -= dx * k; py -= dy * k; pz -= dz * k; const pl = Math.hypot(px, py, pz) || 1;
+  const ex = sx + dx * a + px / pl * h, ey = sy + dy * a + py / pl * h, ez = sz + dz * a + pz / pl * h;
+  xrBone(out, 0, sx, sy, sz, ex, ey, ez); xrBone(out, 16, ex, ey, ez, sx + dx * d, sy + dy * d, sz + dz * d);
+}
 function xrCompose(pose) {
   const W = XR.W; m4mul(XR.headW, W, XR.hm);
+  const arms = R.vrArms || (R.vrArms = []); arms.length = 0;
+  if (Game.player && !Game.player.dead) {
+    const H = XR.headW, yaw = Game.player.yaw, rx = Math.cos(yaw), rz = -Math.sin(yaw), bx = Math.sin(yaw) * 0.06, bz = Math.cos(yaw) * 0.06, sy = H[13] - 0.23;
+    if (XR.hasR) { const g = m4tp(R.wmodel, 0.004, -0.1, 0.12), a = XR.armR || (XR.armR = new Float32Array(32)); xrArm(a, H[12] + rx * 0.19 + bx, sy, H[14] + rz * 0.19 + bz, g[0], g[1], g[2], rx, rz); arms.push(a); }
+    if (XR.hasL) {
+      const g = R.vrTwo ? m4tp(R.wmodel, -0.045, -0.05, -0.2) : m4tp(W, XR.lm[12] + XR.lm[8] * 0.07, XR.lm[13] + XR.lm[9] * 0.07, XR.lm[14] + XR.lm[10] * 0.07), a = XR.armL || (XR.armL = new Float32Array(32));
+      xrArm(a, H[12] - rx * 0.19 + bx, sy, H[14] - rz * 0.19 + bz, g[0], g[1], g[2], -rx, -rz); arms.push(a);
+    }
+  }
   XR.views.length = 0;
   for (const v of pose.views) {
     const vp = XR.layer.getViewport(v); if (!vp || !vp.width) continue;
