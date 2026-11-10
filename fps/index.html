@@ -2262,7 +2262,11 @@ function xrCompose(pose) {
   const pn = R.vrPanels || (R.vrPanels = []); pn.length = 0;
   const scale = (m, sx, sy) => { for (let i = 0; i < 4; i++) { m[i] *= sx; m[4 + i] *= sy; } };
   if (Game.state === 'end') { const m = XR.big; m.set(XR.headW); m4translate(m, 0, -0.08, -1.2); scale(m, 0.44, 0.22); pn.push({ m, a: 0.96 }); }
-  else if (XR.zoomK < 0.5) { const m = XR.big; m.set(XR.headW); m4translate(m, -0.36, -0.3, -1.0); m4rotY(m, 0.3); m4rotX(m, -0.25); scale(m, 0.19, 0.095); pn.push({ m, a: 0.9 }); }
+  else if (XR.zoomK < 0.5) {
+    // follows the turn of the head but not its tilt: it hangs up and to the left, so you glance up to read it
+    const m = XR.big, h = XR.headW, p = Game.player; m4ident(m); m4translate(m, h[12], h[13], h[14]); m4rotY(m, p.yaw);
+    m4translate(m, -0.42, 0.5, -1.05); m4rotY(m, 0.36); m4rotX(m, 0.42); scale(m, 0.2, 0.1); pn.push({ m, a: 0.92 });
+  }
 }
 // wrist display: minimap plus ammo, health and hostiles, drawn to a canvas and uploaded as a texture
 function xrHud(dt) {
