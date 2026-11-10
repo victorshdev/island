@@ -368,7 +368,7 @@ vec3 pbr(vec3 alb,vec3 N,vec3 wp,float rough,float metal,float vis,float ao){
   vec3 hemi=mix(uAmbGround.rgb,uAmbSky.rgb,N.y*0.5+0.5);
   c+=dif*hemi*ao;
   vec3 Rr=reflect(-V,N);
-  vec3 env=mix(skyBase(normalize(vec3(Rr.x,abs(Rr.y)+0.03,Rr.z))),mix(uAmbGround.rgb,uAmbSky.rgb,Rr.y*0.5+0.5)*1.25,clamp(rough*1.15,0.0,1.0));
+  vec3 env=mix(mix(skyBase(normalize(vec3(Rr.x,abs(Rr.y)+0.03,Rr.z))),uAmbGround.rgb*1.7,smoothstep(0.04,-0.3,Rr.y)),mix(uAmbGround.rgb,uAmbSky.rgb,Rr.y*0.5+0.5)*1.25,clamp(rough*1.15,0.0,1.0));
   c+=env*envBRDF(f0,rough,nv)*(ao*(0.35+0.65*vis));
   vec3 fl=uFlashPos.xyz-wp;float fd=dot(fl,fl);
   c+=(dif+f0*0.5)*vec3(1.0,0.62,0.28)*(uFlashPos.w*max(dot(N,fl)*inversesqrt(fd+1e-4),0.0)/(1.0+fd*0.35));
@@ -474,7 +474,63 @@ class MB {
   constructor() { this.v = []; this.i = []; this.m = m4(); this.col = [1, 1, 1]; this.aux = 0; this.u = 0; this.r = 0.6; this.n = 0; this.st = []; }
   push() { this.st.push(new Float32Array(this.m)); return this; }
   pop() { this.m = this.st.pop(); return this; }
-  mat(col, metal, rough) { this.col = col; this.u = metal; this.r = rough; return this; }
+  mat(col, metal, rough) { this.col = col; this.u = this.gun && metal >= 0 && metal <= 1 ? 4 + metal : metal; this.r = rough; return this; }
+  // extrude a side profile [[z,y],...] along X (width w) with chamfered rims (c). In gun mode the chamfer faces carry the edge-wear flag.
+  prof(pts, w, c) {
+    let P = pts.map(q => [q[0], q[1]]), A = 0; const n = P.length, h = w / 2, base = this.n, L = [], aux0 = this.aux, S = 0.7071;
+    for (let i = 0; i < n; i++) { const a = P[i], d = P[(i + 1) % n]; A += a[0] * d[1] - d[0] * a[1]; }
+    if (A < 0) P.reverse();
+    c = Math.min(c === undefined ? 0.0012 : c, h * 0.9);
+    const E = [], Q = [], V = [];
+    for (let i = 0; i < n; i++) { const a = P[i], d = P[(i + 1) % n], dz = d[0] - a[0], dy = d[1] - a[1], l = Math.hypot(dz, dy) || 1; E.push([dy / l, -dz / l]); }
+    for (let i = 0; i < n; i++) {
+      const e0 = E[(i + n - 1) % n], e1 = E[i], dt = e0[0] * e1[0] + e0[1] * e1[1], k = 1 / Math.max(1 + dt, 0.4), sz = e0[0] + e1[0], sy = e0[1] + e1[1], l = Math.hypot(sz, sy) || 1;
+      Q.push([P[i][0] - sz * k * c, P[i][1] - sy * k * c]); V.push(dt > 0.8 ? [sz / l, sy / l] : null);
+    }
+    const vv = (x, y, z, nx, ny, nz) => { L.push([x, y, z, nx, ny, nz]); return this.vert(x, y, z, nx, ny, nz); };
+    const tri = (a, b2, c2) => {
+      const A2 = L[a - base], B = L[b2 - base], C = L[c2 - base], ux = B[0] - A2[0], uy = B[1] - A2[1], uz = B[2] - A2[2], wx = C[0] - A2[0], wy = C[1] - A2[1], wz = C[2] - A2[2];
+      if ((uy * wz - uz * wy) * A2[3] + (uz * wx - ux * wz) * A2[4] + (ux * wy - uy * wx) * A2[5] < 0) this.i.push(a, c2, b2); else this.i.push(a, b2, c2);
+    };
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n, e = E[i], na = V[i] || e, nb = V[j] || e, a = P[i], d = P[j], qa = Q[i], qd = Q[j], hh = h - c;
+      this.aux = this.gun ? 0 : aux0;
+      const w0 = vv(-hh, a[1], a[0], 0, na[1], na[0]), w1 = vv(hh, a[1], a[0], 0, na[1], na[0]), w2 = vv(hh, d[1], d[0], 0, nb[1], nb[0]), w3 = vv(-hh, d[1], d[0], 0, nb[1], nb[0]);
+      tri(w0, w1, w2); tri(w0, w2, w3);
+      if (this.gun) this.aux = 1;
+      for (const sx of [-1, 1]) {
+        const b0 = vv(sx * hh, a[1], a[0], sx * S, na[1] * S, na[0] * S), b1 = vv(sx * hh, d[1], d[0], sx * S, nb[1] * S, nb[0] * S), b3 = vv(sx * h, qa[1], qa[0], sx * S, na[1] * S, na[0] * S), b2 = vv(sx * h, qd[1], qd[0], sx * S, nb[1] * S, nb[0] * S);
+        tri(b0, b1, b2); tri(b0, b2, b3);
+      }
+    }
+    this.aux = this.gun ? 0 : aux0;
+    // caps: ear clipping of the inset outline
+    const cr = (a, b2, c2) => (b2[0] - a[0]) * (c2[1] - a[1]) - (b2[1] - a[1]) * (c2[0] - a[0]);
+    const T = []; let idx = Q.map((_, i) => i), guard = 0;
+    while (idx.length > 3 && guard++ < 4000) {
+      let cut = false;
+      for (let k = 0; k < idx.length; k++) {
+        const m = idx.length, i0 = idx[(k + m - 1) % m], i1 = idx[k], i2 = idx[(k + 1) % m], a = Q[i0], b2 = Q[i1], c2 = Q[i2];
+        if (cr(a, b2, c2) <= 1e-12) continue;
+        let ok = true;
+        for (const o of idx) { if (o === i0 || o === i1 || o === i2) continue; const q = Q[o]; if (cr(a, b2, q) >= 0 && cr(b2, c2, q) >= 0 && cr(c2, a, q) >= 0) { ok = false; break; } }
+        if (!ok) continue;
+        T.push(i0, i1, i2); idx.splice(k, 1); cut = true; break;
+      }
+      if (!cut) idx.splice(0, 1);
+    }
+    if (idx.length === 3) T.push(idx[0], idx[1], idx[2]);
+    for (const sx of [-1, 1]) { const id = Q.map(q => vv(sx * h, q[1], q[0], sx, 0, 0)); for (let t = 0; t < T.length; t += 3) tri(id[T[t]], id[T[t + 1]], id[T[t + 2]]); }
+    this.aux = aux0; return this;
+  }
+  // same, but the profile is a cross-section [[x,y],...] extruded along Z from z0 to z1
+  profZ(pts, z0, z1, c) { this.at(0, 0, (z0 + z1) / 2, 0, PI / 2); this.prof(pts, Math.abs(z1 - z0), c); return this.pop(); }
+  // polyline [[z,y],...] of thickness t as a profile
+  strip(pts, t, w, c) {
+    const a = [], d = [], n = pts.length;
+    for (let i = 0; i < n; i++) { const p0 = pts[Math.max(i - 1, 0)], p1 = pts[Math.min(i + 1, n - 1)], dz = p1[0] - p0[0], dy = p1[1] - p0[1], l = Math.hypot(dz, dy) || 1; a.push([pts[i][0] + dy / l * t / 2, pts[i][1] - dz / l * t / 2]); d.unshift([pts[i][0] - dy / l * t / 2, pts[i][1] + dz / l * t / 2]); }
+    return this.prof(a.concat(d), w, c);
+  }
   raw(x, y, z, nx, ny, nz, u, v, r, g, b, a) { this.v.push(x, y, z, nx, ny, nz, u, v, r, g, b, a); return this.n++; }
   vert(x, y, z, nx, ny, nz) {
     const m = this.m, c = this.col;
@@ -494,7 +550,8 @@ class MB {
         const c = [clamp(p[0], -(h[0] - r), h[0] - r), clamp(p[1], -(h[1] - r), h[1] - r), clamp(p[2], -(h[2] - r), h[2] - r)];
         let dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2]; const l = Math.hypot(dx, dy, dz);
         if (l < 1e-9) { dx = dy = dz = 0; if (an === 0) dx = sg; else if (an === 1) dy = sg; else dz = sg; } else { dx /= l; dy /= l; dz /= l; }
-        id.push(this.vert(c[0] + dx * r, c[1] + dy * r, c[2] + dz * r, dx, dy, dz));
+        const ax = this.aux; if (this.gun) this.aux = l < 1e-9 ? 0 : 0.8;
+        id.push(this.vert(c[0] + dx * r, c[1] + dy * r, c[2] + dz * r, dx, dy, dz)); this.aux = ax;
       }
       const W = cu.length;
       for (let j = 0; j + 1 < cv.length; j++) for (let i = 0; i + 1 < W; i++) this.quad(id[j * W + i], id[j * W + i + 1], id[(j + 1) * W + i + 1], id[(j + 1) * W + i]);
@@ -1039,43 +1096,66 @@ function buildSoldier() {
 // First-person carbine with both arms. Origin at the receiver, barrel along -Z. All one "bone".
 const VM_MUZZLE = [0, 0.002, -0.785], VM_SIGHT_Y = 0.068;
 function buildRifleVM(vr) {
-  const b = new MB(), blk = [0.022, 0.022, 0.025], ano = [0.035, 0.035, 0.04], steel = [0.3, 0.3, 0.31], tan = [0.3, 0.235, 0.15], glove = [0.03, 0.03, 0.032];
-  const poly = () => b.mat(blk, 0, 0.5), alu = () => b.mat(ano, 0.75, 0.38), stl = () => b.mat(steel, 1, 0.34), fde = () => b.mat(tan, 0, 0.56);
-  alu(); b.boxAt(0, 0, -0.02, 0.046, 0.052, 0.25, 0, 0.009); b.boxAt(0, -0.04, 0.012, 0.04, 0.044, 0.19, 0, 0.007);
-  b.boxAt(0, -0.074, -0.07, 0.037, 0.056, 0.07, 0, 0.006);
-  b.boxAt(0, 0.031, -0.16, 0.021, 0.012, 0.5, 0, 0.002);
-  for (let i = 0; i < 38; i++) b.boxAt(0, 0.0395, -0.4 + i * 0.0128, 0.021, 0.005, 0.0066, 0, 0.001);
-  b.boxAt(0, 0.028, 0.094, 0.036, 0.012, 0.03, 0, 0.004); b.tube([0.026, 0.004, 0.06], [0.036, 0.004, 0.075], 0.006, 0.007, 8);
-  stl(); b.boxAt(0.0232, 0.006, -0.03, 0.002, 0.02, 0.055, 0, 0.001); b.boxAt(-0.0232, -0.014, -0.012, 0.003, 0.016, 0.022, 0, 0.001);
-  poly(); b.boxAt(0, -0.165, -0.092, 0.027, 0.175, 0.058, 0.17, 0.007); b.boxAt(0, -0.252, -0.107, 0.031, 0.012, 0.064, 0.17, 0.004);
-  for (let i = 0; i < 4; i++) b.boxAt(0, -0.12 - i * 0.03, -0.085 - i * 0.005, 0.029, 0.004, 0.06, 0.17, 0.001);
-  b.boxAt(0, -0.108, 0.09, 0.032, 0.108, 0.046, -0.32, 0.011);
-  b.boxAt(0, -0.07, 0.034, 0.008, 0.007, 0.075, 0, 0.002); b.boxAt(0, -0.056, 0.068, 0.008, 0.03, 0.007, 0.3, 0.002);
-  stl(); b.boxAt(0, -0.052, 0.038, 0.005, 0.022, 0.007, -0.35, 0.002);
-  fde(); b.boxAt(0, 0.002, -0.285, 0.049, 0.055, 0.285, 0, 0.014);
-  poly(); for (let i = 0; i < 5; i++) for (const sx of [-1, 1]) { b.boxAt(sx * 0.0242, 0.006, -0.175 - i * 0.052, 0.002, 0.011, 0.034, 0, 0.001); b.boxAt(sx * 0.0195, -0.02, -0.175 - i * 0.052, 0.002, 0.008, 0.034, 0, 0.001, 0, sx * 0.6); }
-  stl(); b.tube([0, 0.002, -0.42], [0, 0.002, -0.62], 0.0096, 0.0092, 16);
+  const b = new MB(); b.gun = true;
+  const blk = [0.024, 0.024, 0.026], ano = [0.032, 0.032, 0.036], steel = [0.33, 0.33, 0.34], park = [0.06, 0.06, 0.064], tan = [0.27, 0.205, 0.125], glove = [0.03, 0.03, 0.032], AX = 0.002;
+  const poly = () => b.mat(blk, 0, 0.6), alu = () => b.mat(ano, 0.55, 0.42), stl = () => b.mat(steel, 1, 0.3), phos = () => b.mat(park, 1, 0.5), fde = () => b.mat(tan, 0, 0.62);
+  const hole = () => { b.gun = false; b.mat([0.003, 0.003, 0.003], 0, 0.95); }, G = () => { b.gun = true; };
+  // upper receiver: rounded-shoulder section extruded along the bore
+  alu(); b.profZ([[-0.022, -0.018], [0.022, -0.018], [0.022, 0.011], [0.0195, 0.021], [0.0135, 0.029], [0.0105, 0.0315], [-0.0105, 0.0315], [-0.0135, 0.029], [-0.0195, 0.021], [-0.022, 0.011]], -0.148, 0.094, 0.0022);
+  // lower receiver side profile: magwell with flared mouth, trigger housing, grip tang, buffer tower
+  b.prof([[-0.128, -0.018], [-0.135, -0.03], [-0.133, -0.079], [-0.127, -0.087], [-0.068, -0.093], [-0.059, -0.087], [-0.056, -0.05], [0.046, -0.05], [0.05, -0.06], [0.082, -0.06], [0.1, -0.046], [0.112, -0.03], [0.114, 0.014], [0.109, 0.02], [0.096, 0.02], [0.094, -0.018]], 0.04, 0.003);
+  b.strip([[-0.057, -0.052], [-0.051, -0.084], [0.028, -0.085], [0.047, -0.062]], 0.0042, 0.014, 0.0012);
+  b.at(0, 0, 0, 0, 0, 0); b.tube([0, AX, -0.162], [0, AX, -0.146], 0.0245, 0.0245, 24); b.pop();
+  phos(); b.strip([[0.014, -0.05], [0.0085, -0.06], [0.0075, -0.068], [0.011, -0.076]], 0.0052, 0.0075, 0.0012);
+  // top rail: one continuous comb, 10 mm pitch
+  alu(); { const R0 = [[-0.436, 0.0312], [0.092, 0.0312]]; for (let z = 0.092; z > -0.43; z -= 0.01) R0.push([z, 0.0425], [z - 0.0052, 0.0425], [z - 0.0052, 0.0382], [z - 0.01, 0.0382]); R0.push([-0.436, 0.0382]); b.prof(R0, 0.0212, 0.0007); }
+  b.profZ([[-0.0125, 0.0372], [-0.0106, 0.0352], [0.0106, 0.0352], [0.0125, 0.0372], [0.0106, 0.0392], [-0.0106, 0.0392]], -0.436, 0.092, 0.0005);
+  // free-float handguard: octagonal section, slots cut on five faces
+  b.profZ([[-0.0105, 0.0315], [0.0105, 0.0315], [0.0205, 0.019], [0.0205, -0.012], [0.012, -0.0245], [-0.012, -0.0245], [-0.0205, -0.012], [-0.0205, 0.019]], -0.44, -0.16, 0.0025);
+  hole();
+  for (let i = 0; i < 6; i++) { const z = -0.19 - i * 0.043;
+    for (const sx of [-1, 1]) { b.boxAt(sx * 0.0204, 0.004, z, 0.0008, 0.0072, 0.032, 0, 0.0003); b.boxAt(sx * 0.01625, -0.01825, z, 0.0008, 0.0072, 0.032, 0, 0.0003, 0, -sx * 0.616); b.boxAt(sx * 0.0155, 0.02525, z + 0.0215, 0.0008, 0.006, 0.014, 0, 0.0003, 0, sx * 0.896); }
+    b.boxAt(0, -0.0244, z, 0.0072, 0.0008, 0.032, 0, 0.0003);
+  }
+  G(); phos(); for (let i = 0; i < 2; i++) for (const sx of [-1, 1]) b.tube([sx * 0.0195, -0.004 + i * 0.012, -0.168], [sx * 0.0222, -0.004 + i * 0.012, -0.168], 0.003, 0.003, 10);
+  // barrel, gas block
+  phos(); b.tube([0, AX, -0.43], [0, AX, -0.62], 0.0093, 0.009, 18); b.tube([0, AX, -0.452], [0, AX, -0.478], 0.0125, 0.0125, 18);
   // suppressor: body, end caps, knurled rings, bore
-  b.mat([0.045, 0.045, 0.05], 0.85, 0.46); b.tube([0, 0.002, -0.6], [0, 0.002, -0.775], 0.0185, 0.0185, 20);
-  b.mat([0.07, 0.07, 0.075], 0.9, 0.34); b.tube([0, 0.002, -0.596], [0, 0.002, -0.612], 0.0198, 0.0198, 20); b.tube([0, 0.002, -0.765], [0, 0.002, -0.78], 0.0198, 0.0192, 20);
-  for (let i = 0; i < 9; i++) b.tube([0, 0.002, -0.622 - i * 0.0155], [0, 0.002, -0.63 - i * 0.0155], 0.0193, 0.0193, 20, false);
-  b.mat([0.004, 0.004, 0.004], 0, 0.9); b.tube([0, 0.002, -0.7795], [0, 0.002, -0.781], 0.008, 0.008, 12);
-  b.boxAt(0, 0.018, -0.44, 0.02, 0.03, 0.026, 0, 0.004);
-  alu(); b.tube([0, -0.002, 0.1], [0, -0.002, 0.3], 0.0148, 0.0148, 14);
-  fde(); b.boxAt(0, -0.016, 0.275, 0.04, 0.078, 0.17, 0, 0.012); b.boxAt(0, -0.048, 0.225, 0.036, 0.03, 0.09, 0.25, 0.01);
-  poly(); b.boxAt(0, -0.016, 0.364, 0.041, 0.09, 0.02, 0, 0.006);
-  // receiver furniture: pins, selector, dust cover hinge, brass deflector, bolt catch, sling cup
-  stl();
-  for (const [y, z] of [[-0.036, 0.062], [-0.03, -0.072], [-0.05, 0.01]]) for (const sx of [-1, 1]) b.tube([sx * 0.0195, y, z], [sx * 0.0222, y, z], 0.0042, 0.0042, 10);
-  b.boxAt(-0.0215, -0.04, 0.05, 0.003, 0.007, 0.026, 0.5, 0.0015); b.tube([-0.0195, -0.04, 0.062], [-0.0235, -0.04, 0.062], 0.0058, 0.0058, 10);
-  b.tube([0.0236, 0.017, -0.058], [0.0236, 0.017, 0.0], 0.0022, 0.0022, 8); b.boxAt(0.0245, 0.014, 0.022, 0.008, 0.016, 0.02, 0, 0.003, 0.5);
-  b.boxAt(-0.0225, -0.012, -0.045, 0.003, 0.02, 0.012, 0, 0.001); b.tube([-0.0195, -0.004, 0.105], [-0.0245, -0.004, 0.105], 0.007, 0.007, 12);
-  alu(); b.boxAt(0, 0.028, 0.112, 0.062, 0.008, 0.012, 0, 0.003); b.boxAt(0, 0.0245, 0.05, 0.012, 0.006, 0.09, 0, 0.002);
-  // handguard screws, rail covers, grip ribs, stock slots
-  stl(); for (let i = 0; i < 6; i++) for (const sx of [-1, 1]) b.tube([sx * 0.0238, 0.02, -0.165 - i * 0.047], [sx * 0.0256, 0.02, -0.165 - i * 0.047], 0.0032, 0.0032, 8);
-  poly(); for (let i = 0; i < 6; i++) b.boxAt(0, -0.07 - i * 0.012, 0.079 + i * 0.004, 0.034, 0.003, 0.046, -0.32, 0.001);
-  for (let i = 0; i < 3; i++) for (const sx of [-1, 1]) b.boxAt(sx * 0.0202, -0.016, 0.225 + i * 0.045, 0.002, 0.03, 0.03, 0, 0.001);
-  b.boxAt(0, 0.028, 0.27, 0.03, 0.012, 0.13, 0, 0.005); alu(); b.tube([-0.021, -0.03, 0.33], [0.021, -0.03, 0.33], 0.006, 0.006, 10);
+  b.mat([0.05, 0.05, 0.054], 0.9, 0.5); b.tube([0, AX, -0.6], [0, AX, -0.775], 0.0185, 0.0185, 24);
+  b.mat([0.075, 0.075, 0.08], 0.95, 0.36); b.tube([0, AX, -0.596], [0, AX, -0.612], 0.0198, 0.0198, 24); b.tube([0, AX, -0.765], [0, AX, -0.78], 0.0198, 0.0192, 24);
+  for (let i = 0; i < 9; i++) b.tube([0, AX, -0.622 - i * 0.0155], [0, AX, -0.63 - i * 0.0155], 0.0193, 0.0193, 24, false);
+  hole(); b.tube([0, AX, -0.7795], [0, AX, -0.781], 0.008, 0.008, 12); G();
+  // magazine: curved body, ribs, floor plate
+  { const F = [], Bk = [], M = (s, o) => [-0.094 - 0.03 * s * s - 0.014 * s + o, -0.06 - 0.185 * s];
+    for (let k = 0; k <= 10; k++) { const s = k / 10; F.push(M(s, -0.029)); Bk.unshift(M(s, 0.029)); }
+    b.mat([0.115, 0.095, 0.062], 0, 0.6); b.prof(F.concat(Bk), 0.0236, 0.0032);
+    for (const o of [-0.012, 0.01]) { const Rb = []; for (let k = 2; k <= 9; k++) Rb.push(M(k / 10, o)); b.strip(Rb, 0.007, 0.0252, 0.0008); }
+    const e = M(1, 0); b.at(0, e[1] - 0.004, e[0], 0.27); b.rbox(0.0275, 0.011, 0.066, 0.0035); b.pop(); }
+  // pistol grip with beavertail
+  poly(); b.prof([[0.048, -0.056], [0.056, -0.085], [0.066, -0.122], [0.079, -0.158], [0.121, -0.151], [0.124, -0.136], [0.114, -0.102], [0.108, -0.079], [0.117, -0.059], [0.112, -0.046], [0.085, -0.057]], 0.031, 0.0075);
+  for (let i = 0; i < 7; i++) b.at(0, -0.088 - i * 0.0085, 0.1085 + i * 0.0022, -0.3).rbox(0.0322, 0.0026, 0.012, 0.001).pop();
+  // buffer tube, castle nut, end plate, stock, butt pad, latch
+  alu(); b.tube([0, -0.002, 0.112], [0, -0.002, 0.305], 0.0148, 0.0148, 20); b.tube([0, -0.002, 0.118], [0, -0.002, 0.129], 0.0186, 0.0186, 12); b.boxAt(0, -0.006, 0.1155, 0.036, 0.05, 0.0035, 0, 0.0012);
+  poly(); b.prof([[0.19, 0.017], [0.3, 0.017], [0.356, 0.023], [0.377, 0.021], [0.379, -0.1], [0.366, -0.107], [0.3, -0.062], [0.262, -0.042], [0.2, -0.036], [0.19, -0.03]], 0.042, 0.0065);
+  b.prof([[0.2, 0.017], [0.34, 0.017], [0.34, 0.021], [0.2, 0.021]], 0.03, 0.002); b.prof([[0.27, -0.03], [0.365, -0.03], [0.365, -0.09], [0.3, -0.05]], 0.0436, 0.0012);
+  hole(); b.prof([[0.335, -0.04], [0.356, -0.04], [0.356, -0.076], [0.335, -0.062]], 0.0442, 0.0002); G(); phos(); for (const sx of [-1, 1]) b.tube([sx * 0.02, -0.02, 0.24], [sx * 0.0222, -0.02, 0.24], 0.007, 0.007, 14);
+  b.mat([0.02, 0.02, 0.021], 0, 0.88); b.prof([[0.377, 0.023], [0.388, 0.019], [0.39, -0.1], [0.378, -0.109]], 0.04, 0.004);
+  poly(); b.prof([[0.212, -0.036], [0.258, -0.042], [0.26, -0.052], [0.212, -0.047]], 0.02, 0.002);
+  // charging handle, ejection port with bolt carrier, open dust cover, deflector, forward assist
+  alu(); b.boxAt(0, 0.0275, 0.1, 0.052, 0.0075, 0.013, 0, 0.0025); b.boxAt(-0.02, 0.0275, 0.092, 0.012, 0.007, 0.022, 0, 0.002); b.boxAt(0, 0.0255, 0.06, 0.012, 0.005, 0.07, 0, 0.0015);
+  hole(); b.boxAt(0.0221, 0.005, -0.04, 0.0008, 0.017, 0.058, 0, 0.0003); G();
+  stl(); b.boxAt(0.0222, 0.006, -0.036, 0.001, 0.011, 0.042, 0, 0.0003);
+  alu(); b.boxAt(0.0258, -0.0125, -0.04, 0.0022, 0.016, 0.06, 0, 0.0009, 0, 0.5); b.tube([0.0226, -0.0045, -0.07], [0.0226, -0.0045, -0.01], 0.0019, 0.0019, 8);
+  b.prof([[0.0, -0.004], [0.022, -0.004], [0.022, 0.014], [0.012, 0.014]].map(q => [q[0] - 0.006, q[1]]), 0.052, 0.002);
+  b.tube([0.018, 0.008, 0.05], [0.034, 0.003, 0.074], 0.0066, 0.0066, 14); phos(); b.tube([0.034, 0.003, 0.074], [0.0362, 0.0023, 0.0773], 0.0076, 0.0076, 14);
+  // pins, selector, bolt catch, magazine release, sling cup
+  phos();
+  for (const [y, z] of [[-0.032, 0.07], [-0.03, -0.118], [-0.04, 0.012], [-0.03, 0.03]]) for (const sx of [-1, 1]) b.tube([sx * 0.0195, y, z], [sx * 0.0212, y, z], 0.0036, 0.0036, 12);
+  b.tube([-0.0195, -0.036, 0.052], [-0.0232, -0.036, 0.052], 0.0058, 0.0058, 12); b.boxAt(-0.0222, -0.039, 0.04, 0.0028, 0.0066, 0.026, 0.45, 0.0012);
+  b.boxAt(-0.0222, -0.012, -0.06, 0.0034, 0.024, 0.011, 0, 0.0012); b.boxAt(-0.0232, -0.002, -0.06, 0.003, 0.012, 0.016, 0, 0.0012);
+  b.tube([0.0195, -0.03, -0.062], [0.0238, -0.03, -0.062], 0.005, 0.005, 12); alu(); b.boxAt(0.0215, -0.03, -0.076, 0.003, 0.014, 0.014, 0, 0.001);
+  phos(); b.tube([-0.0195, -0.006, 0.104], [-0.0238, -0.006, 0.104], 0.0068, 0.0068, 14); hole(); b.tube([-0.0238, -0.006, 0.104], [-0.0241, -0.006, 0.104], 0.0045, 0.0045, 12);
+  b.gun = false; b.mat([0.75, 0.75, 0.72], 0, 0.6); b.boxAt(-0.0202, -0.036, 0.0655, 0.0005, 0.002, 0.002, 0, 0); b.mat([0.6, 0.04, 0.03], 0, 0.6); b.boxAt(-0.0202, -0.0285, 0.052, 0.0005, 0.002, 0.002, 0, 0); G();
   // folded backup sights and a light on the right rail
   alu(); b.boxAt(0, 0.045, -0.39, 0.022, 0.012, 0.04, 0, 0.003); b.boxAt(0, 0.045, 0.06, 0.024, 0.012, 0.036, 0, 0.003);
   b.mat([0.03, 0.03, 0.034], 0.7, 0.42); b.tube([0.04, 0.004, -0.3], [0.04, 0.004, -0.4], 0.0125, 0.0125, 16); b.tube([0.04, 0.004, -0.392], [0.04, 0.004, -0.412], 0.0155, 0.0148, 16); b.boxAt(0.031, 0.004, -0.33, 0.012, 0.016, 0.04, 0, 0.003);
@@ -1090,6 +1170,7 @@ function buildRifleVM(vr) {
   b.tube([0.025, 0.08, -0.06], [0.0295, 0.08, -0.06], 0.006, 0.006, 12); b.tube([0, 0.1, -0.06], [0, 0.1035, -0.06], 0.006, 0.006, 12);
   b.mat([1.0, 0.13, 0.05], 2, 0.5); b.boxAt(0, VM_SIGHT_Y, -0.0725, 0.0022, 0.0022, 0.0003, 0, 0);
   b.mat([0.02, 0.03, 0.03], 3, 0.1); b.boxAt(0, 0.073, -0.071, 0.037, 0.041, 0.0006, 0, 0);
+  b.gun = false;
   if (!vr) {
   // left arm: sleeve from the lower left, glove clamped on the side of the handguard, thumb over the top
     if (!vr) { b.mat([0.2, 0.2, 0.2], -1, 0.92); b.tube([-0.2, -0.31, 0.03], [-0.056, -0.07, -0.185], 0.046, 0.036, 16); }
@@ -1408,32 +1489,51 @@ void main(){if(vUv.x<1.5&&texture(uLeafTex,vUv).a<0.42)discard;}`,
   objVS: `
 layout(location=0) in vec3 aPos;layout(location=1) in vec3 aNrm;layout(location=2) in vec2 aUv;layout(location=3) in vec4 aCol;
 uniform mat4 uVP;uniform mat4 uBones[12];
-out vec3 vW;out vec3 vN;out vec3 vCol;out vec3 vL;out vec2 vMat;
+out vec3 vW;out vec3 vN;out vec3 vCol;out vec3 vL;out vec2 vMat;out float vE;out vec3 vT0;out vec3 vT1;
 void main(){
-  mat4 m=uBones[int(aCol.a+0.5)];
+  float g=step(3.5,aUv.x);vE=aCol.a*g;float bi=aCol.a*(1.0-g);
+  mat4 m=uBones[int(bi+0.5)];
   vec4 wp=m*vec4(aPos,1.0);
-  vW=wp.xyz;vN=mat3(m)*aNrm;vCol=aCol.rgb;vL=aPos+aCol.a*0.37;vMat=aUv;
+  vW=wp.xyz;vN=mat3(m)*aNrm;vCol=aCol.rgb;vL=aPos+bi*0.37;vMat=aUv;vT0=mat3(m)*vec3(0.0,0.0,1.0);vT1=mat3(m)*vec3(0.0,1.0,0.0);
   gl_Position=uVP*wp;
 }`,
   objFS: LIT + `
-in vec3 vW;in vec3 vN;in vec3 vCol;in vec3 vL;in vec2 vMat;out vec4 o;
+in vec3 vW;in vec3 vN;in vec3 vCol;in vec3 vL;in vec2 vMat;in float vE;in vec3 vT0;in vec3 vT1;out vec4 o;
 uniform sampler2D uInfoTex;uniform sampler2D uInfo2Tex;uniform sampler2D uNoiseTex;uniform vec3 uTint;
 void main(){
-  if(vMat.x>2.5){vec3 Ng=normalize(vN),Vg=normalize(uCamPos.xyz-vW);float fg=0.04+0.96*pow(1.0-abs(dot(Ng,Vg)),5.0);vec3 Rg=reflect(-Vg,Ng);vec3 eg=skyBase(normalize(vec3(Rg.x,abs(Rg.y)+0.03,Rg.z)))*(0.05+fg);float ag=0.1+0.6*fg;o=outPre(eg+vec3(0.004,0.01,0.012)*ag,ag);return;}
-  if(vMat.x>1.5){o=outCol(vCol*2.6,1.0);return;}
+  if(vMat.x>2.5&&vMat.x<3.5){vec3 Ng=normalize(vN),Vg=normalize(uCamPos.xyz-vW);float fg=0.04+0.96*pow(1.0-abs(dot(Ng,Vg)),5.0);vec3 Rg=reflect(-Vg,Ng);vec3 eg=skyBase(normalize(vec3(Rg.x,abs(Rg.y)+0.03,Rg.z)))*(0.05+fg);float ag=0.1+0.6*fg;o=outPre(eg+vec3(0.004,0.01,0.012)*ag,ag);return;}
+  if(vMat.x>1.5&&vMat.x<2.5){o=outCol(vCol*2.6,1.0);return;}
   vec3 N=normalize(vN);vec2 tuv=(vW.xz+513.0)/1026.0;
   float terr=texture(uInfoTex,tuv).b,aoT=texture(uInfo2Tex,tuv).g;
   vec4 nz=texture(uNoiseTex,vL.xy*2.3+vL.z*1.7),n2=texture(uNoiseTex,vL.zy*3.1+vL.x*2.3+0.37),n3=texture(uNoiseTex,vL.xy*31.0+vL.z*23.0);
-  vec3 alb=vCol;float metal=max(vMat.x,0.0),rough=vMat.y;
+  vec3 alb=vCol;float gun=step(3.5,vMat.x),metal=max(vMat.x-4.0*gun,0.0),rough=vMat.y;
   if(vMat.x<-0.5){
     alb=mix(vec3(0.052,0.068,0.034),vec3(0.125,0.122,0.078),smoothstep(0.53,0.58,nz.r));
     alb=mix(alb,vec3(0.02,0.029,0.017),smoothstep(0.52,0.57,n2.a));
     alb=mix(alb,vec3(0.06,0.045,0.03),smoothstep(0.67,0.71,nz.r*0.5+n2.a*0.5+0.12));
     alb*=uTint*(0.85+0.3*n3.r);
+  }else if(gun>0.5){
+    // weapon surface: fine grain, smudged roughness, dust, chamfer wear down to bare metal, long handling scratches
+    vec2 q0=vL.zy+vL.x*vec2(0.61,0.37);
+    vec4 a=texture(uNoiseTex,q0*7.0),b=texture(uNoiseTex,q0*61.0+0.37),c=texture(uNoiseTex,q0*19.0+0.71);
+    float s=texture(uNoiseTex,vec2(q0.x*5.0,q0.y*130.0)+0.13).a;
+    float pol=1.0-smoothstep(0.1,0.3,metal);
+    float dust=smoothstep(0.5,0.72,a.r*0.6+c.a*0.4),sm=smoothstep(0.45,0.7,a.a);
+    float wear=smoothstep(0.6,0.7,vE*(0.2+0.8*(c.r*0.6+b.r*0.4)));
+    float scr=smoothstep(0.83,0.86,s)*smoothstep(0.56,0.7,a.a)*0.4;
+    float bare=clamp(wear+scr,0.0,1.0);
+    alb*=0.9+0.2*b.a;
+    alb=mix(alb,vec3(0.2,0.165,0.12),dust*0.05*(0.3+0.7*rough));
+    alb=mix(alb,mix(vec3(0.42,0.415,0.4),alb*2.4+0.03,pol),bare*0.9);
+    metal=mix(metal,mix(1.0,metal,pol),bare);
+    rough=clamp(rough+(a.r-0.5)*0.13+(b.r-0.5)*0.08+dust*0.07-sm*0.06,0.16,1.0);
+    rough=mix(rough,mix(0.3,rough*0.72,pol),bare);
+    vec2 gr=(b.gb-0.5)*(0.05+0.14*pol)+(c.gb-0.5)*(0.035+0.03*pol);
+    N=normalize(N-gr.x*vT0-gr.y*vT1);
   }else{
     rough=clamp(rough+(nz.a-0.5)*0.24+(n3.r-0.5)*0.12,0.1,1.0);alb*=0.84+0.32*n3.a;
   }
-  N=normalize(N+(n3.gbg-0.5)*(vMat.x<-0.5?0.14:0.05));
+  if(gun<0.5)N=normalize(N+(n3.gbg-0.5)*(vMat.x<-0.5?0.14:0.05));
   vec3 c=pbr(alb,N,vW,rough,metal,sunVis(vW,N,terr,1.0),mix(1.0,aoT,0.7));
   o=outCol(applyFog(c,vW),1.0);
 }`,
@@ -2703,10 +2803,10 @@ function updatePlayer(dt) {
   const sw = 1 - 0.75 * a;
   m4ident(m);
   m4translate(m, lerp(0.105, 0, a) + Math.sin(p.stepPh) * 0.007 * bob + p.swayX * sw - 0.05 * sk + Math.sin(t * 0.9) * 0.0012 * sw,
-    lerp(-0.118, -VM_SIGHT_Y, a) + Math.cos(p.stepPh * 2) * 0.005 * bob + p.swayY * sw - 0.05 * sk - 0.075 * rl - p.land * 0.03 + Math.sin(t * 1.4) * 0.0015 * sw,
-    lerp(-0.37, -0.19, a) + p.kick * 0.034 * (1 - 0.45 * a) + 0.03 * sk);
-  m4rotY(m, 0.04 * (1 - a) + 0.62 * sk + p.swayX * 1.2 * sw); m4rotX(m, p.kick * 0.028 - 0.32 * sk + 0.3 * rl - p.swayY * 1.2 * sw); m4rotZ(m, 0.5 * rl + p.swayX * 1.5 * sw - 0.15 * sk);
-  camMatrix(_cw, c); m4mul(R.wmodel, _cw, m); R.showWeapon = true;
+    lerp(-0.108, -VM_SIGHT_Y, a) + Math.cos(p.stepPh * 2) * 0.005 * bob + p.swayY * sw - 0.05 * sk - 0.075 * rl - p.land * 0.03 + Math.sin(t * 1.4) * 0.0015 * sw,
+    lerp(-0.335, -0.19, a) + p.kick * 0.034 * (1 - 0.45 * a) + 0.03 * sk);
+  m4rotY(m, 0.085 * (1 - a) + 0.62 * sk + p.swayX * 1.2 * sw); m4rotX(m, p.kick * 0.028 - 0.32 * sk + 0.3 * rl - p.swayY * 1.2 * sw); m4rotZ(m, -0.07 * (1 - a) + 0.5 * rl + p.swayX * 1.5 * sw - 0.15 * sk);
+  camMatrix(_cw, c); m4mul(R.wmodel, _cw, window.__WM || m); R.showWeapon = true;
 }
 
 function updateGame(dt) {
